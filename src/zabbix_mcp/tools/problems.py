@@ -17,6 +17,9 @@ from zabbix_mcp.zabbix_client import ZabbixClient
 # event.acknowledge bit that makes Zabbix record the message text.
 _ADD_MESSAGE = 4
 
+# event.acknowledge bit that suppresses the event until a given time.
+_SUPPRESS = 32
+
 
 def register_problems_tools(mcp, config: ZabbixConfig):
     """Register Zabbix problems tools with the MCP server"""
@@ -269,6 +272,13 @@ def register_problems_tools(mcp, config: ZabbixConfig):
                 description="If true, include the tags for each event in the response (selectTags=extend).",
             ),
         ] = False,
+        select_suppression_data: Annotated[
+            bool,
+            Field(
+                default=False,
+                description="If true, include the active suppressions for each event in the response (selectSuppressionData=extend).",
+            ),
+        ] = False,
         sortfield: Annotated[
             str,
             Field(
@@ -309,6 +319,7 @@ def register_problems_tools(mcp, config: ZabbixConfig):
             select_hosts: If true, include the hosts each event belongs to.
             select_related_object: If true, include the related object (like trigger) that generated the event.
             select_tags: If true, include the tags for each event.
+            select_suppression_data: If true, include the active suppressions for each event.
 
         Returns:
             dict: Contains 'events' list with event objects, 'count' of returned events,
@@ -352,6 +363,8 @@ def register_problems_tools(mcp, config: ZabbixConfig):
                 shape["selectRelatedObject"] = "extend"
             if select_tags:
                 shape["selectTags"] = "extend"
+            if select_suppression_data:
+                shape["selectSuppressionData"] = "extend"
 
             async with ZabbixClient(config) as api:
                 if count_output:
@@ -395,16 +408,27 @@ def register_problems_tools(mcp, config: ZabbixConfig):
             int,
             Field(
                 default=2,
-                description="Bitmask: 1=close problem, 2=acknowledge, 4=add message, 8=change severity, 16=unacknowledge, 32=suppress, 64=unsuppress.",
+                description="Bitmask: 1=close problem, 2=acknowledge, 4=add message, 8=change severity, 16=unacknowledge, 32=suppress (requires suppress_until), 64=unsuppress.",
             ),
         ] = 2,
         message: Annotated[str | None, Field(default=None)] = None,
+        suppress_until: Annotated[
+            int | None,
+            Field(
+                default=None,
+                description=(
+                    "Unix timestamp the suppression expires at, or 0 to suppress "
+                    "indefinitely. Required when action includes 32 (suppress)."
+                ),
+            ),
+        ] = None,
     ) -> dict:
         """
         Acknowledge events in Zabbix.
 
         Mark events (problems/alerts) as acknowledged to show that operations staff are aware
-        of and working on the issue. Acknowledged events can also be closed if resolved.
+        of and working on the issue. Acknowledged events can also be closed if resolved, or
+        suppressed until a given time.
 
         Args:
             eventids: List of event IDs to acknowledge. Find them with event_get.
@@ -414,20 +438,36 @@ def register_problems_tools(mcp, config: ZabbixConfig):
                    - 4 = Add message to event
                    - 8 = Change severity
                    - 16 = Unacknowledge the event
-                   - 32 = Suppress the event
+                   - 32 = Suppress the event (requires 'suppress_until')
                    - 64 = Unsuppress the event
                    Default is 2 (acknowledge). Example: 6 acknowledges and adds a message.
             message: Message to add to the event. The 'add message' flag (4) is added to
                      'action' automatically when this is set - Zabbix otherwise accepts
                      the call and stores an empty message, losing the text silently.
+            suppress_until: Unix timestamp the suppression expires at, or 0 for indefinite.
+                     Required when action includes 32, and rejected when it does not.
 
         Returns:
             dict: Contains 'success' flag and may include event IDs that were successfully acknowledged.
 
         Note: Acknowledging an event doesn't resolve the underlying problem - it just marks that
               the issue has been noticed. The trigger still needs the underlying condition fixed.
+              Suppression is applied by the server, so the 'suppressed' flag can lag by seconds.
         """
         try:
+            # Zabbix accepts a suppress action with no suppress_until, reports
+            # success and applies nothing, so refuse the call instead.
+            if action & _SUPPRESS and suppress_until is None:
+                raise ValueError(
+                    "action includes 32 (suppress) but suppress_until was not provided. "
+                    "Pass a Unix timestamp for the expiry, or 0 to suppress indefinitely."
+                )
+            if suppress_until is not None and not action & _SUPPRESS:
+                raise ValueError(
+                    "suppress_until was provided but action does not include 32 (suppress). "
+                    "Add 32 to the action, or drop suppress_until."
+                )
+
             await ctx.info(f"Acknowledging events: {eventids}...")
             params: dict[str, Any] = {"eventids": eventids, "action": action}
             if message:
@@ -436,6 +476,8 @@ def register_problems_tools(mcp, config: ZabbixConfig):
                 # caller's text disappear without any error.
                 params["action"] = action | _ADD_MESSAGE
                 params["message"] = message
+            if suppress_until is not None:
+                params["suppress_until"] = suppress_until
 
             async with ZabbixClient(config) as api:
                 result = await api.event.acknowledge(**params)

@@ -22,7 +22,7 @@ Zabbix MCP Server is a Python-based Model Context Protocol (MCP) server designed
 - Manage triggers, items, and discovery rules
 - Configure maintenance periods and user macros
 - Execute scripts on monitored hosts
-- Acknowledge events and close problems
+- Acknowledge events, suppress them for a bounded period, and close problems
 - Create and manage users and proxies
 - Support for bulk operations on hosts and templates
 
@@ -257,8 +257,8 @@ MCP_TRANSPORT=stdio
 ### Problem & Event Management
 
 - `problem_get`: Get current problems with severity and time filtering
-- `event_get`: Get events with time range filtering
-- `event_acknowledge`: Acknowledge events with optional messages
+- `event_get`: Get events with time range filtering and optional suppression data
+- `event_acknowledge`: Acknowledge, close, message, suppress or unsuppress events
 
 ### History & Trends
 
